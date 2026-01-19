@@ -1,0 +1,54 @@
+# Virtual environments
+venv/
+.venv/
+env/
+.env/
+ENV/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Sensitive files - NEVER COMMIT
+tmp/
+*.pem
+*.key
+*_key
+authorized_keys
+.env
+.env.*
+*.secret
+secrets/
+
+# Logs
+*.log
+logs/
+
+# Docker volumes (local data)
+prometheus_data/
+grafana_data/
+
+# Test/Coverage
+.coverage
+htmlcov/
+.pytest_cache/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Local config overrides
+*.local
+*.local.*
