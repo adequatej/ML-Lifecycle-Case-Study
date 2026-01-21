@@ -1,14 +1,3 @@
----
-title: AI Music Recommendation Bot
-emoji: 🎵
-colorFrom: green
-colorTo: black
-sdk: gradio
-sdk_version: 4.44.0
-app_file: app.py
-pinned: false
----
-
 # ML Lifecycle Case Study: AI-Powered Music Recommendation Bot
 
 A production-style MLOps project demonstrating the full machine learning lifecycle, from model integration to multi-cloud deployment with observability.
