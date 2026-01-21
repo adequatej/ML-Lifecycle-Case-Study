@@ -1,11 +1,20 @@
 global:
   scrape_interval: 15s
+  evaluation_interval: 15s
 
 scrape_configs:
-  - job_name: 'gradio_app'
+  # Application metrics (Prometheus client)
+  - job_name: 'music-recommendation-bot'
     static_configs:
-      - targets: ['localhost:8000']
+      - targets: ['app:8000']
+    metrics_path: /metrics
 
+  # Node exporter for system metrics
   - job_name: 'node_exporter'
     static_configs:
-      - targets: ['localhost:9100']
+      - targets: ['app:9100']
+
+  # Prometheus self-monitoring
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']

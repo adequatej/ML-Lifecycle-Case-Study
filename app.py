@@ -1,180 +1,265 @@
 import gradio as gr
 from huggingface_hub import InferenceClient
-#import torch
-#from transformers import pipeline
+# Uncomment below for local model inference
+# import torch
+# from transformers import pipeline
+import spotipy
+from spotipy.oauth2 import SpotifyClientCredentials
 from prometheus_client import start_http_server, Counter, Summary
 
-# Prometheus metrics
-REQUEST_COUNTER = Counter('app_requests_total', 'Total number of requests')
-SUCCESSFUL_REQUESTS = Counter('app_successful_requests_total', 'Total number of successful requests')
-FAILED_REQUESTS = Counter('app_failed_requests_total', 'Total number of failed requests')
-REQUEST_DURATION = Summary('app_request_duration_seconds', 'Time spent processing request')
-
-# Inference client setup
+# Inference client setup (API-based)
 client = InferenceClient("HuggingFaceH4/zephyr-7b-beta")
+
+# Uncomment below for local model inference (requires GPU)
 # pipe = pipeline("text-generation", "microsoft/Phi-3-mini-4k-instruct", torch_dtype=torch.bfloat16, device_map="auto")
+
+# Prometheus Metrics
+RECOMMENDATIONS_PROCESSED = Counter('app_recommendations_processed', 'Total number of recommendation requests processed')
+SUCCESSFUL_RECOMMENDATIONS = Counter('app_successful_recommendations', 'Total number of successful recommendations')
+FAILED_RECOMMENDATIONS = Counter('app_failed_recommendations', 'Total number of failed recommendations')
+RECOMMENDATION_DURATION = Summary('app_recommendation_duration_seconds', 'Time spent processing recommendation')
+USER_INTERACTIONS = Counter('app_user_interactions', 'Total number of user interactions')
+CANCELLED_RECOMMENDATIONS = Counter('app_cancelled_recommendations', 'Total number of cancelled recommendations')
+
+
+def spotify_rec(track_name, artist, client_id, client_secret):
+    """
+    Get Spotify song recommendations based on a seed track.
+    
+    Args:
+        track_name: Name of the seed track
+        artist: Artist of the seed track
+        client_id: Spotify API client ID
+        client_secret: Spotify API client secret
+    
+    Returns:
+        String containing list of recommended songs
+    """
+    # Validate client ID and client secret
+    if not client_id or not client_secret:
+        FAILED_RECOMMENDATIONS.inc()
+        return "Please provide Spotify API credentials."
+
+    # Set up Spotify credentials
+    client_credentials_manager = SpotifyClientCredentials(client_id=client_id, client_secret=client_secret)
+    sp = spotipy.Spotify(client_credentials_manager=client_credentials_manager)
+    
+    # Get track 
+    results = sp.search(q=f"track:{track_name} artist:{artist}", type='track')
+    if not results['tracks']['items']:
+        FAILED_RECOMMENDATIONS.inc()
+        return "No tracks found for the given track name and artist."
+    
+    track_uri = results['tracks']['items'][0]['uri']
+
+    # Get recommended tracks
+    recommendations = sp.recommendations(seed_tracks=[track_uri])['tracks']
+    
+    if not recommendations:
+        FAILED_RECOMMENDATIONS.inc()
+        return "No recommendations found."
+    
+    recommendation_list = [f"{track['name']} by {track['artists'][0]['name']}" for track in recommendations]
+    
+    SUCCESSFUL_RECOMMENDATIONS.inc()
+    RECOMMENDATIONS_PROCESSED.inc()
+    
+    return "\n".join(recommendation_list)
+
 
 # Global flag to handle cancellation
 stop_inference = False
 
+
+@RECOMMENDATION_DURATION.time()
 def respond(
-    message,
+    track_name,
+    artist,
     history: list[tuple[str, str]],
-    system_message="You are a friendly Chatbot.",
+    system_message="You are a music expert chatbot that provides song recommendations based on user preferences.",
     max_tokens=512,
-    temperature=0.7,
-    top_p=0.95,
     use_local_model=False,
+    client_id=None,
+    client_secret=None
 ):
+    """
+    Process user request and generate music recommendations using Spotify API
+    and LLM-powered conversation.
+    
+    Args:
+        track_name: Name of the song to base recommendations on
+        artist: Artist of the song
+        history: Chat history
+        system_message: System prompt for the LLM
+        max_tokens: Maximum tokens to generate
+        use_local_model: If True, use local pipeline instead of API
+        client_id: Spotify API client ID
+        client_secret: Spotify API client secret
+    """
     global stop_inference
-    stop_inference = False  # Reset cancellation flag
-    REQUEST_COUNTER.inc()  # Increment request counter
-    request_timer = REQUEST_DURATION.time()  # Start timing the request
+    stop_inference = False
+    USER_INTERACTIONS.inc()
 
-    try:
-        # Initialize history if it's None
-        if history is None:
-            history = []
+    if history is None:
+        history = []
 
-        if use_local_model:
-            # Local inference
-            messages = [{"role": "system", "content": system_message}]
-            for val in history:
-                if val[0]:
-                    messages.append({"role": "user", "content": val[0]})
-                if val[1]:
-                    messages.append({"role": "assistant", "content": val[1]})
-            messages.append({"role": "user", "content": message})
+    # Get Spotify recommendations
+    recommendations = spotify_rec(track_name, artist, client_id, client_secret)
+    
+    # Build conversation with LLM to enhance recommendations
+    messages = [{"role": "system", "content": system_message}]
+    for val in history:
+        if val[0]:
+            messages.append({"role": "user", "content": val[0]})
+        if val[1]:
+            messages.append({"role": "assistant", "content": val[1]})
+    
+    user_message = f"I like '{track_name}' by {artist}. Here are some Spotify recommendations:\n{recommendations}\n\nCan you tell me more about these songs and suggest why I might enjoy them?"
+    messages.append({"role": "user", "content": user_message})
 
-            response = ""
+    response = f"**Spotify Recommendations based on '{track_name}' by {artist}:**\n{recommendations}\n\n"
+    
+    if use_local_model:
+        # Local model inference (requires uncommenting imports and pipeline above)
+        # This uses a locally-loaded model for inference
+        try:
             for output in pipe(
                 messages,
                 max_new_tokens=max_tokens,
-                temperature=temperature,
                 do_sample=True,
-                top_p=top_p,
             ):
                 if stop_inference:
-                    response = "Inference cancelled."
-                    yield history + [(message, response)]
+                    CANCELLED_RECOMMENDATIONS.inc()
+                    response += "\n\n*Inference cancelled.*"
+                    yield history + [(f"{track_name} by {artist}", response)]
                     return
                 token = output['generated_text'][-1]['content']
                 response += token
-                yield history + [(message, response)]  # Yield history + new response
-
-        else:
-            raise NotImplementedError("API-based inference is not supported.")
-            # API-based inference
-            messages = [{"role": "system", "content": system_message}]
-            for val in history:
-                if val[0]:
-                    messages.append({"role": "user", "content": val[0]})
-                if val[1]:
-                    messages.append({"role": "assistant", "content": val[1]})
-            messages.append({"role": "user", "content": message})
-
-            response = ""
-            for message_chunk in client.chat_completion(
-                messages,
-                max_tokens=max_tokens,
-                stream=True,
-                temperature=temperature,
-                top_p=top_p,
-            ):
-                if stop_inference:
-                    response = "Inference cancelled."
-                    yield history + [(message, response)]
-                    return
-                if stop_inference:
-                    response = "Inference cancelled."
-                    break
-                token = message_chunk.choices[0].delta.content
+                yield history + [(f"{track_name} by {artist}", response)]
+        except NameError:
+            # pipe is not defined - local model not configured
+            FAILED_RECOMMENDATIONS.inc()
+            response += "*Error: Local model not configured. Please uncomment the torch/transformers imports and pipeline initialization in app.py, or uncheck 'Use Local Model'.*"
+            yield history + [(f"{track_name} by {artist}", response)]
+            return
+    else:
+        # API-based inference using HuggingFace Inference API
+        for message_chunk in client.chat_completion(
+            messages,
+            max_tokens=max_tokens,
+            stream=True,
+        ):
+            if stop_inference:
+                CANCELLED_RECOMMENDATIONS.inc()
+                response += "\n\n*Inference cancelled.*"
+                yield history + [(f"{track_name} by {artist}", response)]
+                return
+            token = message_chunk.choices[0].delta.content
+            if token:
                 response += token
-                yield history + [(message, response)]  # Yield history + new response
-
-        SUCCESSFUL_REQUESTS.inc()  # Increment successful request counter
-    except Exception as e:
-        FAILED_REQUESTS.inc()  # Increment failed request counter
-        yield history + [(message, f"Error: {str(e)}")]
-    finally:
-        request_timer.observe_duration()  # Stop timing the request
+            yield history + [(f"{track_name} by {artist}", response)]
 
 
 def cancel_inference():
+    """Cancel the ongoing inference."""
     global stop_inference
     stop_inference = True
 
-# Custom CSS for a fancy look
+
+# Custom CSS for styling
 custom_css = """
 #main-container {
-    background-color: #f0f0f0;
-    font-family: 'Arial', sans-serif;
+    background-color: #121212;
+    font-family: 'Circular', 'Helvetica Neue', sans-serif;
 }
 
 .gradio-container {
-    max-width: 700px;
+    max-width: 800px;
     margin: 0 auto;
     padding: 20px;
-    background: white;
-    box-shadow: 0 4px 8px rgba(0, 0, 0, 0.1);
-    border-radius: 10px;
+    background: linear-gradient(135deg, #1DB954 0%, #191414 50%);
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+    border-radius: 12px;
 }
 
 .gr-button {
-    background-color: #4CAF50;
+    background-color: #1DB954;
     color: white;
     border: none;
-    border-radius: 5px;
-    padding: 10px 20px;
+    border-radius: 25px;
+    padding: 12px 24px;
     cursor: pointer;
-    transition: background-color 0.3s ease;
+    transition: all 0.3s ease;
+    font-weight: bold;
 }
 
 .gr-button:hover {
-    background-color: #45a049;
-}
-
-.gr-slider input {
-    color: #4CAF50;
+    background-color: #1ed760;
+    transform: scale(1.05);
 }
 
 .gr-chat {
     font-size: 16px;
+    background-color: #282828;
+    border-radius: 8px;
 }
 
 #title {
     text-align: center;
-    font-size: 2em;
+    font-size: 2.5em;
     margin-bottom: 20px;
-    color: #333;
+    color: #1DB954;
 }
 """
 
-# Define the interface
+# Define the Gradio interface
 with gr.Blocks(css=custom_css) as demo:
-    gr.Markdown("<h1 style='text-align: center;'>🌟 Fancy AI Chatbot 🌟</h1>")
-    gr.Markdown("Interact with the AI chatbot using customizable settings below.")
+    gr.Markdown("<h1 style='text-align: center; color: #1DB954;'>🎵 AI Music Recommendation Bot 🎵</h1>")
+    gr.Markdown("""
+    Enter a song and artist you like, and get personalized Spotify recommendations 
+    enhanced with AI-powered insights from Zephyr-7B.
+    """)
 
     with gr.Row():
-        system_message = gr.Textbox(value="You are a friendly Chatbot.", label="System message", interactive=True)
+        system_message = gr.Textbox(
+            value="You are a music expert chatbot that provides insightful song recommendations based on user preferences.",
+            label="System Message",
+            interactive=True
+        )
         use_local_model = gr.Checkbox(label="Use Local Model", value=False)
 
     with gr.Row():
-        max_tokens = gr.Slider(minimum=1, maximum=2048, value=512, step=1, label="Max new tokens")
-        temperature = gr.Slider(minimum=0.1, maximum=4.0, value=0.7, step=0.1, label="Temperature")
-        top_p = gr.Slider(minimum=0.1, maximum=1.0, value=0.95, step=0.05, label="Top-p (nucleus sampling)")
+        max_tokens = gr.Slider(minimum=1, maximum=2048, value=512, step=1, label="Max Tokens")
 
-    chat_history = gr.Chatbot(label="Chat")
+    chat_history = gr.Chatbot(label="Recommendations")
 
-    user_input = gr.Textbox(show_label=False, placeholder="Type your message here...")
+    with gr.Row():
+        track_name = gr.Textbox(label="Song Name", placeholder="Enter a song name (e.g., Shape of You)")
+        artist = gr.Textbox(label="Artist", placeholder="Enter the artist (e.g., Ed Sheeran)")
+    
+    with gr.Row():
+        client_id = gr.Textbox(label="Spotify Client ID", placeholder="Your Spotify API Client ID")
+        client_secret = gr.Textbox(label="Spotify Client Secret", placeholder="Your Spotify API Client Secret", type="password")
 
-    cancel_button = gr.Button("Cancel Inference", variant="danger")
+    with gr.Row():
+        submit_btn = gr.Button("Get Recommendations", variant="primary")
+        cancel_button = gr.Button("Cancel", variant="secondary")
 
-    user_input.submit(respond, [user_input, chat_history, system_message, max_tokens, temperature, top_p, use_local_model], chat_history)
-
+    submit_btn.click(
+        respond,
+        [track_name, artist, chat_history, system_message, max_tokens, use_local_model, client_id, client_secret],
+        chat_history
+    )
+    track_name.submit(
+        respond,
+        [track_name, artist, chat_history, system_message, max_tokens, use_local_model, client_id, client_secret],
+        chat_history
+    )
     cancel_button.click(cancel_inference)
 
 if __name__ == "__main__":
-    start_http_server(8000)  # Expose metrics on port 8000
+    # Start Prometheus metrics server
+    start_http_server(8000)
     
-    demo.launch(server_port=7860, share=False) 
+    # Launch Gradio app
+    demo.launch(server_port=7860, share=False)
